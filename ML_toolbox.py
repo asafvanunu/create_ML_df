@@ -425,7 +425,7 @@ def get_GOES_actual_fire_pixel_locations(GOES_Fire_Index_array, rasterize_VIIRS)
         VIIRS_fp_locations = get_my_neighbores(array = GOES_Fire_Index_array, row_i = VIIRS_fp_row,
                                            col_j = VIIRS_fp_col, distance=1, value_or_index="index")
         
-        condition_list = [] ## create a list of conditions
+        condition_list = [] ## create a list of conditions [True, False, True, ...]
         for loc in VIIRS_fp_locations: ## loop through the VIIRS locations for example [[1,2], [2,3], [3,4]]
             tuple_loc = tuple(loc) ## convert the list to a tuple for example (1,2)
             GOES_fp_set = {tuple(fp) for fp in GOES_fp_list} ## create a set of the GOES fire pixels
@@ -532,7 +532,7 @@ def remove_cloud_neighbores(band_array, cloud_mask_array, row_i, col_j, distance
         row_i (int): fire pixel row index
         col_j (int): fire pixel column index
         distance (int): the buffer distance 1 for 3x3 and 2 for 5x5
-        cloud_probability_list (list): list of cloud probabilities of ACM to be excluded for example [3,4]
+        cloud_probability_list (list): list of cloud probabilities of ACM to be excluded for example [2,3]
         statistic (string): the statistic to calculate for example "mean". Avilable statistics are "mean", "median, "std, "max", "min"
     """
     if isinstance(band_array, np.ndarray) == False:
@@ -602,7 +602,7 @@ def remove_cloud_neighbores(band_array, cloud_mask_array, row_i, col_j, distance
                         return min_value
 
 # %%
-def get_fire_pixel_values_in_all_bands(pixel_location_list, MCMI_path, FDC_path, ACM_path, VIIRS_path, GOES_date_time, rasterize_VIIRS, cloud_probability_list=[3,4]):
+def get_fire_pixel_values_in_all_bands(pixel_location_list, MCMI_path, FDC_path, ACM_path, VIIRS_path, GOES_date_time, rasterize_VIIRS, cloud_probability_list=[2,3]):
     """This function gets the pixel location list and the MCMI and VIIRS paths and return a df with pixel values
 
     Args:
@@ -950,8 +950,8 @@ def create_ML_training_df(MCMI_path, FDC_path,
                           GOES_date_time,
                           temporal_df, VIIRS_threshold=1,
                           number_of_temporal_GOES_images=4, 
-                          number_of_non_fire_pixels=10,
-                          cloud_probability_list=[3,4]):
+                          number_of_non_fire_pixels=500,
+                          cloud_probability_list=[2,3]):
     """This function gets the MCMI, FDC, ACM, VIIRS paths and the temporal_df and return the ML training DataFrame
 
     Args:
