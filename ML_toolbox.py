@@ -211,6 +211,66 @@ def crop_GOES_using_VIIRS(GOES_path, GOES_band ,VIIRS_path):
     
 
 # %%
+def crop_GOES_using_AOI(GOES_path, GOES_band ,AOI_path):
+    """This function crops the GOES file using the VIIRS file. It returns the cropped GOES file
+
+    Args:
+        GOES_path (string): The path of the GOES file. Can be MCMI, FDC, or ACM files. for example 'F:\\ML_project\\GOES_16\\MCMI\\OR_ABI-L2-MCMIPC-M6_G16_s202301010751.nc
+        GOES_band (string\int): The band of the GOES file. It can be "all" for all MCMI bands or can be 7 for MCMI. For FDC can be "Mask", "Temp", "Power". For ACM can be "Mask", "Temp", "Power". For ACM can be "ACM" or "BCM"
+        AOI_path (string): The path of the AOI shapefile. for example 'F:\\ML_project\\east_us\\AOI.shp'
+    """
+    CMI_bands = list(range(1,17)) ## The CMI bands
+    CMI_bands.append("all") ## Add all to the CMI bands
+    FDC_bands = ["Mask", "Temp", "Power"] ## The FDC bands
+    ACM_bands = ["ACM", "BCM"] ## The ACM bands
+    band_types = CMI_bands + FDC_bands + ACM_bands ## All band types
+    file_name = os.path.basename(GOES_path) ## Get the base name of the GOES file
+    file_type = file_name.split("-")[2] ## Get the file type of the GOES file
+    if file_type not in ["MCMIPC", "FDCC", "ACMC"]: ## If the file type is not MCMIPC, FDCC, or ACMC
+        raise ValueError("The GOES file should be either MCMI, FDC, or ACM files") ## Raise an error
+    if GOES_band not in band_types:
+        raise ValueError("The GOES band should be either CMI for MCMI, Mask, Temp, Power for FDC, and ACM, BCM for ACM")
+    
+    if (file_type == "MCMIPC") and (GOES_band == "all"): ## If the file type is MCMIPC and the band is all
+        GOES_image = rioxarray.open_rasterio(GOES_path) ## Open the MCMI file
+        CMI_list = [f"CMI_C{band:02d}" for band in range(1, 17)] ## Get the CMI bands
+    elif file_type == "MCMIPC": ## If the file type is MCMIPC
+        GOES_image = open_MCMI(MCMI_path=GOES_path, band_number=GOES_band) ## Open the MCMI file
+    elif file_type == "FDCC": ## If the file type is FDCC
+        GOES_image = open_FDC(FDC_path=GOES_path, product_name=GOES_band) ## Open the FDC file
+    elif file_type == "ACMC": ## If the file type is ACMC
+        GOES_image = open_ACM(ACM_path=GOES_path, product_name=GOES_band) ## Open the ACM file
+        
+    try: ## Try to get the VIIRS polygon
+        GOES_CRS = GOES_image.rio.crs ## Get the CRS of the GOES file
+        AOI_polygon = gpd.read_file(AOI_path) ## Get the AOI polygon
+    except: ## If there is an error
+        print(f"Error in getting the AOI polygon for the AOI file: {AOI_path}") ## Print an error message
+        return None
+    
+    try: ## Try to crop the GOES image
+        AOI_polygon = AOI_polygon.to_crs(GOES_CRS) ## Convert the VIIRS polygon to the CRS of the GOES image
+        GOES_cropped = GOES_image.rio.clip(AOI_polygon.geometry) ## Clip the GOES image using the VIIRS polygon
+        if GOES_band == "all": ##
+            GOES_cropped = GOES_cropped.astype("float32") ## Convert the MCMI to float32
+            for band in CMI_list: ## For all CMI bands 
+                band_add_factor = GOES_cropped[band].attrs["add_offset"] ## Get the add offset
+                band_scale_factor = GOES_cropped[band].attrs["scale_factor"] ## Get the scale factor
+                band_fill_value = GOES_cropped[band].attrs["_FillValue"] ## Get the fill value
+                band_values = GOES_cropped[band].values[0] ## Get the values of the band
+                band_values[band_values == band_fill_value] = np.nan ## set the fill value to nan
+                GOES_cropped[band].values[0] = band_values * band_scale_factor + band_add_factor ## Get the values of the band
+            GOES_cropped = GOES_cropped.rio.write_crs(GOES_CRS) ## Write the CRS of the band
+            return GOES_cropped ## Return the cropped GOES image
+
+        else: ## If the band is not all      
+            corrected_GOES_cropped = fix_fill_values(GOES_cropped) ## Fix the fill values of the cropped GOES image
+            return corrected_GOES_cropped ## Return the cropped GOES image
+    except: ## If there is an error
+        print(f"Error in cropping the GOES image: {GOES_path}")
+        return None
+
+# %%
 def rasterize_VIIRS(cropped_GOES_image, filter_VIIRS_gdf, rasterize_type="count" ,number_of_VIIRS_points=1, VIIRS_band = None):
     """This function rasterizes the VIIRS points and returns rasterized VIIRS image in the shape of the cropped GOES image
 
@@ -314,20 +374,21 @@ def get_my_neighbores(array, row_i, col_j, distance=1, value_or_index="value"):
                      [row_i+1, col_j-1],
                      [row_i+1, col_j],
                      [row_i+1, col_j+1]]
-        remove_list = []
+        replace_list = [] ## create an empty list
         for i in range(len(neighbors)): ## loop through the neighbors
             ## check if the neighbors are out of the range of the array
             if (neighbors[i][0] < 0) or (neighbors[i][0] >= array_shape[0]) or (neighbors[i][1] < 0) or (neighbors[i][1] >= array_shape[1]):
-                remove_list.append(neighbors[i]) ## add the neighbors to the remove_list
+                replace_list.append(neighbors[i]) ## add the neighbors to the replace_list
                 
-        for bad_pixel in remove_list: ## loop through the bad pixels
-            neighbors.remove(bad_pixel) ## remove the bad pixels from the neighbors
             
         if value_or_index == "value": ## check if the value_or_index is value
             list_of_values = [] ## create an empty list
-            for i in range(len(neighbors)):
-                pixel_value = array[neighbors[i][0], neighbors[i][1]] ## get the value of the pixel
-                list_of_values.append(pixel_value) ## add the value to the list_of_values
+            for i in range(len(neighbors)): ## loop through the neighbors
+                if neighbors[i] in replace_list: ## check if the neighbors are out of the range of the array
+                    list_of_values.append(np.nan) ## add nan to the list_of_values
+                else: ## if the neighbors are in the range of the array
+                    pixel_value = array[neighbors[i][0], neighbors[i][1]] ## get the value of the pixel
+                    list_of_values.append(pixel_value) ## add the value to the list_of_values
             return list_of_values ## return the list_of_values
         elif value_or_index == "index": ## check if the value_or_index is index
             return neighbors
@@ -358,23 +419,24 @@ def get_my_neighbores(array, row_i, col_j, distance=1, value_or_index="value"):
                      [row_i+2, col_j],
                      [row_i+2, col_j+1],
                      [row_i+2, col_j+2]]
-        remove_list = []
+        replace_list = [] ## create an empty list
         for i in range(len(neighbors)): ## loop through the neighbors
             ## check if the neighbors are out of the range of the array
             if (neighbors[i][0] < 0) or (neighbors[i][0] >= array_shape[0]) or (neighbors[i][1] < 0) or (neighbors[i][1] >= array_shape[1]):
-                remove_list.append(neighbors[i])   
-        for bad_pixel in remove_list:
-            neighbors.remove(bad_pixel)
+                replace_list.append(neighbors[i])    ## add the neighbors to the replace_list
+        
             
         if value_or_index == "value": ## check if the value_or_index is value
             list_of_values = [] ## create an empty list
             for i in range(len(neighbors)): ## loop through the neighbors
-                pixel_value = array[neighbors[i][0], neighbors[i][1]] ## get the value of the pixel
-                list_of_values.append(pixel_value) ## add the value to the list_of_values
+                if neighbors[i] in replace_list: ## check if the neighbors are out of the range of the array
+                    list_of_values.append(np.nan) ## add nan to the list_of_values
+                else: ## if the neighbors are in the range of the array
+                    pixel_value = array[neighbors[i][0], neighbors[i][1]] ## get the value of the pixel
+                    list_of_values.append(pixel_value) ## add the value to the list_of_values
             return list_of_values ## return the list_of_values
         elif value_or_index == "index": ## check if the value_or_index is index
             return neighbors ## return the neighbors
-   
 
 # %%
 def VIIRS_locations_to_kill(rasterize_VIIRS):
@@ -491,6 +553,24 @@ def nan_locations_to_kill(GOES_Fire_Index_array):
     for row,col in zip(nan_row, nan_col): ## loop through the nan values locations
         nan_loc_list.append([row,col]) ## append the location to the nan_loc_list
     return nan_loc_list ## return the nan_loc_list
+
+# %%
+def GOES_all_pixel_location_list(GOES_Fire_Index_array):
+    """This function get GOES fire index array and return all the pixel locations in a list for example [[0,0], [0,1], ...]
+
+    Args:
+        GOES_Fire_Index_array (array): GOES Fire Index array
+    """
+    
+    if isinstance(GOES_Fire_Index_array, np.ndarray) == False:
+        raise ValueError("GOES_Fire_Index_array should be a numpy array")
+    
+    GOES_all_pixel_location_list = [] ## list of all the pixel locations
+    image_shape = GOES_Fire_Index_array.shape ## get the shape of the GOES Fire Index array
+    for i in range(image_shape[0]): ## loop through the rows
+        for j in range(image_shape[1]): ## loop through the columns
+            GOES_all_pixel_location_list.append([i,j]) ## append the location to the GOES_all_pixel_location_list
+    return GOES_all_pixel_location_list ## return the GOES_all_pixel_location_list
 
 # %%
 def get_random_non_fire_pixels(GOES_Fire_Index_array, corrected_kill_list, number_of_non_fire_pixels):
@@ -613,7 +693,7 @@ def get_fire_pixel_values_in_all_bands(pixel_location_list, MCMI_path, FDC_path,
         VIIRS_path (str): VIIRS image path for example 'F:\\ML_project\\east_us\\VIIRS\\VIIRS_fire\\VNP14IMG.nc'
         GOES_date_time (str): GOES date time for example '2023-01-01 07:51'
         rasterize_VIIRS (array): rasterized VIIRS image
-        cloud_probability_list (list): list of cloud probabilities of ACM to be excluded for example [3,4]
+        cloud_probability_list (list): list of cloud probabilities of ACM to be excluded for example [2,3]
     """
     if isinstance(pixel_location_list, list) == False:
         raise ValueError("pixel_location_list should be a list")
@@ -727,7 +807,7 @@ def get_fire_pixel_values_in_all_bands(pixel_location_list, MCMI_path, FDC_path,
                     elif stat == "max": ## check if the stat is max
                         FI_n_max_list.append(stat_value) ## append the max to the FI_n_max_list
             d[f"{t}_FI_value"] = FI_value_list ## add the FI_value_list to the dictionary
-            d[f"{t}_tFI_mean"] = FI_n_mean_list ## add the FI_n_mean_list to the dictionary
+            d[f"{t}_FI_mean"] = FI_n_mean_list ## add the FI_n_mean_list to the dictionary
             d[f"{t}_FI_median"] = FI_n_median_list ## add the FI_n_median_list to the dictionary
             d[f"{t}_FI_std"] = FI_n_std_list ## add the FI_n_std_list to the dictionary
             d[f"{t}_FI_min"] = FI_n_min_list ## add the FI_n_min_list to the dictionary
@@ -791,7 +871,7 @@ def get_fire_pixel_values_in_all_bands(pixel_location_list, MCMI_path, FDC_path,
     return df ## return the DataFrame
 
 # %%
-def get_temporal_fire_pixel_values_in_all_bands(temporal_df, pixel_location_list, VIIRS_path ,GOES_date_time ,temporal_images=4, cloud_probability_list=[3,4]):
+def get_temporal_fire_pixel_values_in_all_bands(temporal_df, pixel_location_list, VIIRS_path ,GOES_date_time ,temporal_images=4, cloud_probability_list=[2,3]):
     """This function gets the pixel location list and the MCMI and VIIRS paths and return a df with pixel values
 
     Args:
@@ -1098,6 +1178,462 @@ def create_ML_training_df(MCMI_path, FDC_path,
         print(f"done. df is ready for GOES time stamp: {GOES_date_time}")
         train_df = pd.concat([df_fire_pixels_concat_temporal, df_non_fire_pixels_concat_temporal]).reset_index(drop=True) ## concatenate the fire and non-fire DataFrames
         return train_df ## return the train_df
+    
+
+# %%
+def get_fire_pixel_values_in_all_bands_for_AOI_image(pixel_location_list, MCMI_path, FDC_path, ACM_path, VIIRS_path, AOI_path, GOES_date_time, rasterize_VIIRS, cloud_probability_list=[2,3]):
+    """This function gets the full pixel location list and the MCMI and AOI paths and return a df with pixel values
+
+    Args:
+        pixel_location_list (list): full pixel location list for all of the image. for example [[1,2], [3,4]]
+        MCMI_path (str): MCMI full path for example 'F:\\ML_project\\GOES_16\\MCMI\\OR_ABI-L2-MCMIPC-M6_G16_s202301010751.nc'
+        FDC_path (str): FDC full path for example 'F:\\ML_project\\GOES_16\\FDC\\OR_ABI-L2-FDCC-M6_G16_s202301010751.nc'
+        ACM_path (str): ACM full path for example 'F:\\ML_project\\GOES_16\\ACM\\OR_ABI-L2-ACMC-M6_G16_s202301010751.nc'
+        AOI_path (str): AOI shapefile path for example 'F:\\ML_project\\east_us\\AOI\\AOI_fire\\AOI_fire.shp'
+        VIIRS_path (str): VIIRS image path for example 'F:\\ML_project\\east_us\\VIIRS\\VIIRS_fire\\VNP14IMG.nc'
+        GOES_date_time (str): GOES date time for example '2023-01-01 07:51'
+        rasterize_VIIRS (array): rasterized VIIRS image
+    """
+    if isinstance(pixel_location_list, list) == False:
+        raise ValueError("pixel_location_list should be a list")
+    if isinstance(MCMI_path, str) == False:
+        raise ValueError("MCMI_path should be a string")
+    if isinstance(FDC_path, str) == False:
+        raise ValueError("FDC_path should be a string")
+    if isinstance(ACM_path, str) == False:
+        raise ValueError("ACM_path should be a string")
+    if isinstance(AOI_path, str) == False:
+        raise ValueError("AOI_path should be a string")
+    if isinstance(VIIRS_path, str) == False:
+        raise ValueError("VIIRS_path should be a string")
+    if isinstance(GOES_date_time, str) == False:
+        raise ValueError("GOES_date_time should be a string")
+    if isinstance(rasterize_VIIRS, np.ndarray) == False:
+        raise ValueError("rasterize_VIIRS should be a numpy array")
+    
+    ## Now we will open the VIIRS file for day/night
+    try:
+        VIIRS_file = xr.open_dataset(VIIRS_path) ## open the MCMI file
+        VIIRS_day_night = VIIRS_file.attrs['Day/Night/Both']
+        if VIIRS_day_night == "Day": ## check if the VIIRS file is for day
+            is_day = 1 ## set the is_day to 1
+            is_night = 0 ## set the is_night to 0
+            is_day_night = 0 ## set the is_day_night to 0
+        elif VIIRS_day_night == "Night": ## check if the VIIRS file is for night
+            is_day = 0 ## set the is_day to 0
+            is_night = 1 ## set the is_night to 1
+            is_day_night = 0 ## set the is_day_night to 0
+        elif VIIRS_day_night == "Both": ## check if the VIIRS file is for both day and night
+            is_day = 0 ## set the is_day to 0
+            is_night = 0 ## set the is_night to 0
+            is_day_night = 1 ## set the is_day_night to 1
+    except: ## if there is an error
+        print(f"Error in opening the VIIRS file: {VIIRS_path}") ## print an error message
+        ## set the is_day, is_night, and is_day_night to -999
+        is_day = -999
+        is_night = -999
+        is_day_night = -999
+    t = "t0" ## set the time to t0
+    ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="ACM", AOI_path=AOI_path) ## crop the GOES image using the AOI
+    ACM_values = ACM.values[0] ## get the values of the ACM
+    FDC = crop_GOES_using_AOI(GOES_path=FDC_path, GOES_band="Mask", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
+    FDC_values = FDC.values[0] ## get the values of the FDC
+    MCMI = crop_GOES_using_AOI(GOES_path=MCMI_path, GOES_band="all", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
+    B7_values = MCMI["CMI_C07"].values[0] ## get the values of the band
+    B14_values = MCMI["CMI_C14"].values[0] ## get the values of the band
+    FI = (B7_values - B14_values) / (B7_values + B14_values) ## calculate the fire index
+    band_list = [f"CMI_C{band:02d}" for band in range(1, 17)] ## Get the CMI bands
+    indices_list = ["FI"] ## list of indices for example fire index (FI)
+    band_iteration_list = band_list + indices_list ## combine the band_list and indices_list
+    statistics_list = ["value", "mean", "median", "std","min","max"] ## list of statistics for example value, mean, median, std
+    
+    row_list = [] ## list to store the row values
+    col_list = [] ## list to store the column values
+    ACM_list = [] ## list to store the ACM values
+    FDC_list = [] ## list to store the FDC values
+    VIIRS_max_list = [] ## list to store the VIIRS max value
+    VIIRS_sum_list = [] ## list to store the VIIRS sum value
+    
+    for loc in pixel_location_list: ## loop through the pixel location list
+        row = loc[0] ## get the row location
+        col = loc[1] ## get the column location
+        row_list.append(row) ## append the row to the row_list
+        col_list.append(col) ## append the column to the col_list
+        ACM_value = ACM_values[row, col] ## get the value of the ACM
+        FDC_value = FDC_values[row, col] ## get the value of the FDC
+        ACM_list.append(ACM_value) ## append the ACM value to the ACM_list
+        FDC_list.append(FDC_value) ## append the FDC value to the FDC_list
+        ## get the neighbors of the pixel including the pixel itself in VIIRS rasterized image
+        VIIRS_n = get_my_neighbores(array=rasterize_VIIRS, row_i=row, col_j=col, distance=1, value_or_index="value")
+        max_VIIRS_n = np.nanmax(VIIRS_n) ## get the max value of the neighbors
+        sum_VIIRS_n = np.nansum(VIIRS_n) ## get the sum value of the neighbors
+        VIIRS_max_list.append(max_VIIRS_n) ## append the max value to the VIIRS_values_list
+        VIIRS_sum_list.append(sum_VIIRS_n) ## append the sum value to the VIIRS_values_list
+        
+    d = {} ## dictionary to store the values
+    d["row"] = row_list ## add the row_list to the dictionary
+    d["col"] = col_list ## add the col_list to the dictionary
+    d["VIIRS_fp_max"] = VIIRS_max_list ## add the VIIRS_values_list to the dictionary
+    d["VIIRS_fp_sum"] = VIIRS_sum_list ## add the VIIRS_values_list to the dictionary
+    for band in band_iteration_list: ## loop through the band_iteration_list
+        if band == "FI": ## check if the band is FI
+            FI_value_list = [] ## list to store the fire index values
+            FI_n_mean_list = [] ## list to store the fire index mean values
+            FI_n_median_list = [] ## list to store the fire index median values
+            FI_n_std_list = [] ## list to store the fire index std values
+            FI_n_min_list = [] ## list to store the fire index min values
+            FI_n_max_list = [] ## list to store the fire index max values
+            for loc in pixel_location_list: ## loop through the pixel location list
+                row = loc[0] ## get the row location
+                col = loc[1] ## get the column location
+                for stat in statistics_list: ## loop through the statistics_list
+                    ## get the neighbors of the pixel including the pixel itself
+                    stat_value = remove_cloud_neighbores(band_array=FI, 
+                                                              cloud_mask_array=ACM_values,
+                                                              row_i=row,
+                                                              col_j=col,
+                                                              distance=1,
+                                                              cloud_probability_list=cloud_probability_list,
+                                                              statistic=stat) ## get the neighbors of the pixel
+                    if stat == "value":
+                        FI_value_list.append(stat_value) ## append the value to the FI_value_list
+                    elif stat == "mean": ## check if the stat is mean
+                        FI_n_mean_list.append(stat_value) ## append the mean to the FI_n_mean_list
+                    elif stat == "median": ## check if the stat is median
+                        FI_n_median_list.append(stat_value) ## append the median to the FI_n_median_list
+                    elif stat == "std": ## check if the stat is std
+                        FI_n_std_list.append(stat_value) ## append the std to the FI_n_std_list
+                    elif stat == "min": ## check if the stat is min
+                        FI_n_min_list.append(stat_value) ## append the min to the FI_n_min_list
+                    elif stat == "max": ## check if the stat is max
+                        FI_n_max_list.append(stat_value) ## append the max to the FI_n_max_list
+            d[f"{t}_FI_value"] = FI_value_list ## add the FI_value_list to the dictionary
+            d[f"{t}_FI_mean"] = FI_n_mean_list ## add the FI_n_mean_list to the dictionary
+            d[f"{t}_FI_median"] = FI_n_median_list ## add the FI_n_median_list to the dictionary
+            d[f"{t}_FI_std"] = FI_n_std_list ## add the FI_n_std_list to the dictionary
+            d[f"{t}_FI_min"] = FI_n_min_list ## add the FI_n_min_list to the dictionary
+            d[f"{t}_FI_max"] = FI_n_max_list ## add the FI_n_max_list to the dictionary
+        else: ## if the band is not FI
+            band_number = f'B{band.split("_")[-1][1:]}' ## get the band number for example B01
+            ## crop the GOES image using the VIIRS image
+            B = MCMI[band] ## get the band
+            band_array = B.values[0] ## get the values of the band
+            band_value_list = [] ## list to store the band values
+            band_n_mean_list = [] ## list to store the band mean values
+            band_n_median_list = [] ## list to store the band median values
+            band_n_std_list = [] ## list to store the band std values
+            band_n_min_list = [] ## list to store the band min values
+            band_n_max_list = [] ## list to store the band max values
+            for loc in pixel_location_list: ## loop through the pixel location list
+                row = loc[0] ## get the row location
+                col = loc[1] ## get the column location
+                for stat in statistics_list: ## loop through the statistics_list
+                    ## get the neighbors of the pixel including the pixel itself
+                    stat_value = remove_cloud_neighbores(band_array=band_array, 
+                                                              cloud_mask_array=ACM_values,
+                                                              row_i=row,
+                                                              col_j=col,
+                                                              distance=1,
+                                                              cloud_probability_list=cloud_probability_list,
+                                                              statistic=stat) ## get the neighbors of the pixel
+                    if stat == "value": ## check if the stat is value
+                        band_value_list.append(stat_value) ## append the value to the band_value_list
+                    elif stat == "mean": ## check if the stat is mean
+                        band_n_mean_list.append(stat_value) ## append the mean to the band_n_mean_list
+                    elif stat == "median": ## check if the stat is median
+                        band_n_median_list.append(stat_value) ## append the median to the band_n_median_list
+                    elif stat == "std": ## check if the stat is std
+                        band_n_std_list.append(stat_value) ## append the std to the band_n_std_list
+                    elif stat == "min": ## check if the stat is min
+                        band_n_min_list.append(stat_value)
+                    elif stat == "max": ## check if the stat is max
+                        band_n_max_list.append(stat_value)
+            d[f"{t}_{band_number}_value"] = band_value_list ## add the band_value_list to the dictionary
+            d[f"{t}_{band_number}_mean"] = band_n_mean_list ## add the band_n_mean_list to the dictionary
+            d[f"{t}_{band_number}_median"] = band_n_median_list ## add the band_n_median_list to the dictionary
+            d[f"{t}_{band_number}_std"] = band_n_std_list ## add the band_n_std_list to the dictionary
+            d[f"{t}_{band_number}_min"] = band_n_min_list ## add the band_n_min_list to the dictionary
+            d[f"{t}_{band_number}_max"] = band_n_max_list ## add the band_n_max_list to the dictionary
+        
+    df = pd.DataFrame(d) ## create a DataFrame from the dictionary
+    df[f"{t}_FDC_value"] = FDC_list ## add the FDC_list to the DataFrame
+    df[f"{t}_ACM_value"] = ACM_list ## add the ACM_list to the DataFrame
+    day_list = np.repeat(is_day, len(df)) ## repeat the is_day for the length of the DataFrame
+    night_list = np.repeat(is_night, len(df)) ## repeat the is_night for the length of the DataFrame
+    day_night_list = np.repeat(is_day_night, len(df)) ## repeat the is_day_night for the length of the DataFrame
+    df["is_day"] = day_list ## add the is_day to the DataFrame
+    df["is_night"] = night_list ## add the is_night to the DataFrame
+    df["is_day_night"] = day_night_list ## add the is_day_night to the DataFrame
+    file_name = os.path.basename(MCMI_path).split("_")[-1] ## get the base name of the MCMI file 
+    file_name_list = np.repeat(file_name, len(df)) ## repeat the file name for the length of the DataFrame
+    date_time_list = np.repeat(GOES_date_time, len(df)) ## repeat the date time for the length of the DataFrame
+    df.insert(0, f"{t}_MCMI_file", file_name_list) ## insert the file name to the first column
+    df.insert(1, f"{t}_GOES_date_time", date_time_list) ## insert the date time to the second column
+    return df ## return the DataFrame
+
+# %%
+def get_temporal_fire_pixel_values_in_all_bands_for_AOI_image(temporal_df, pixel_location_list, VIIRS_path, AOI_path ,GOES_date_time ,temporal_images=4, cloud_probability_list=[2,3]):
+    """This function gets the pixel location list and the MCMI and VIIRS paths and return a df with pixel values
+
+    Args:
+        temporal_df (DataFrame): DataFrame with the temporal values
+        pixel_location_list (list): pixel location list for example [[1,2], [3,4]]
+        VIIRS_path (str): VIIRS image path for example 'F:\\ML_project\\east_us\\VIIRS\\VIIRS_fire\\VNP14IMG.nc'
+        AOI_path (str): AOI shapefile path for example 'F:\\ML_project\\east_us\\AOI\\AOI_fire\\AOI_fire.shp'
+        GOES_date_time (str): GOES date time for example '2023-01-01 07:51'
+        temporal_images (int, optional): number of temporal images to get. Defaults to 4. It should be between 1 and 4
+        cloud_probability_list (list, optional): list of cloud probabilities of ACM to be excluded for example [2,3]. Defaults to [2,3].
+    """
+    
+    if isinstance(temporal_df, pd.DataFrame) == False:
+        raise ValueError("temporal_df should be a DataFrame")
+    if isinstance(pixel_location_list, list) == False:
+        raise ValueError("pixel_location_list should be a list")
+    if isinstance(VIIRS_path, str) == False:
+        raise ValueError("VIIRS_path should be a string")
+    if isinstance(AOI_path, str) == False:
+        raise ValueError("AOI_path should be a string")
+    if temporal_images not in [1,2,3,4]:
+        raise ValueError("temporal should be between 1 and 4")
+    
+    filter_temporal_df = temporal_df[temporal_df["GOES_date_time"] == GOES_date_time] ## filter the temporal_df for the GOES_date_time
+    band_list = list(range(1,17)) ## list of the MCMI bands
+    CMI_list = [f"CMI_C{band:02d}" for band in band_list] ## list of the CMI bands
+    indices_list = ["FI"] ## list of indices for example fire index (FI)
+    band_iteration_list = CMI_list + indices_list ## combine the band_list and indices_list
+    statistics_list = ["value", "mean", "median", "std", "min", "max"] ## list of statistics for example value, mean, median, std
+    df_list = [] ## list to store the DataFrames
+    for t in range(temporal_images):
+        full_file_name = os.path.basename(filter_temporal_df["MCMI"].iloc[t]) ## get the base name of the MCMI file
+        file_date_name = full_file_name.split("_")[-1] ## get the file name
+        file_date = file_date_name.split(".")[0][1:] ## get the date of the file
+        Year = file_date[:4] ## get the year of the file
+        Month = file_date[4:6] ## get the month of the file
+        Day = file_date[6:8] ## get the day of the file
+        Hour = file_date[8:10] ## get the hour of the file
+        Minute = file_date[10:12]
+        string_date = f"{Year}-{Month}-{Day} {Hour}:{Minute}" ## create a string date
+        ACM_path = filter_temporal_df["ACM"].iloc[t] ## get the ACM path
+        FDC_path = filter_temporal_df["FDC"].iloc[t] ## get the FDC path
+        MCMI_path = filter_temporal_df["MCMI"].iloc[t] ## get the MCMI path
+        ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="ACM", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
+        ACM_values = ACM.values[0] ## get the values of the ACM
+        FDC = crop_GOES_using_AOI(GOES_path=FDC_path, GOES_band="Mask", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
+        FDC_values = FDC.values[0] ## get the values of the FDC
+        MCMI = crop_GOES_using_AOI(GOES_path=MCMI_path, GOES_band="all", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
+        B7_values = MCMI["CMI_C07"].values[0] ## get the values of the band
+        B14_values = MCMI["CMI_C14"].values[0] ## get the values of the band
+        FI = (B7_values - B14_values) / (B7_values + B14_values) ## calculate the fire index
+        ACM_list = [] ## list to store the ACM values
+        FDC_list = [] ## list to store the FDC values
+        d = {} ## dictionary to store the values
+        for loc in pixel_location_list: ## loop through the pixel location list
+            row = loc[0] ## get the row location
+            col = loc[1] ## get the column location
+            ACM_value = ACM_values[row, col] ## get the value of the ACM
+            FDC_value = FDC_values[row, col] ## get the value of the FDC
+            ACM_list.append(ACM_value) ## append the ACM value to the ACM_list
+            FDC_list.append(FDC_value) ## append the FDC value to the FDC_list
+        for band in band_iteration_list: ## loop through the band_iteration_list
+            if band == "FI": ## check if the band is FI
+                FI_value_list = [] ## list to store the fire index values
+                FI_n_mean_list = [] ## list to store the fire index mean values
+                FI_n_median_list = [] ## list to store the fire index median values
+                FI_n_std_list = [] ## list to store the fire index std values
+                FI_n_min_list = [] ## list to store the fire index min values
+                FI_n_max_list = [] ## list to store the fire index max values
+                for loc in pixel_location_list: ## loop through the pixel location list
+                    row = loc[0] ## get the row location
+                    col = loc[1] ## get the column location
+                    for stat in statistics_list: ## loop through the statistics_list
+                    ## get the neighbors of the pixel including the pixel itself
+                        stat_value = remove_cloud_neighbores(band_array=FI,
+                                                             cloud_mask_array=ACM_values,
+                                                             row_i=row,
+                                                             col_j=col,
+                                                             distance=1,
+                                                             cloud_probability_list=cloud_probability_list,
+                                                             statistic=stat)
+                        if stat == "value":
+                            FI_value_list.append(stat_value) ## append the value to the FI_value_list
+                        elif stat == "mean": ## check if the stat is mean
+                            FI_n_mean_list.append(stat_value) ## append the mean to the FI_n_mean_list
+                        elif stat == "median": ## check if the stat is median
+                            FI_n_median_list.append(stat_value) ## append the median to the FI_n_median_list
+                        elif stat == "std": ## check if the stat is std
+                            FI_n_std_list.append(stat_value) ## append the std to the FI_n_std_list
+                        elif stat == "min": ## check if the stat is min
+                            FI_n_min_list.append(stat_value) ## append the min to the FI_n_min_list
+                        elif stat == "max": ## check if the stat is max
+                            FI_n_max_list.append(stat_value) ## append the max to the FI_n_max_list
+                d[f"t{t+1}_FI_value"] = FI_value_list ## add the FI_value_list to the dictionary
+                d[f"t{t+1}_FI_mean"] = FI_n_mean_list ## add the FI_n_mean_list to the dictionary
+                d[f"t{t+1}_FI_median"] = FI_n_median_list ## add the FI_n_median_list to the dictionary
+                d[f"t{t+1}_FI_std"] = FI_n_std_list ## add the FI_n_std_list to the dictionary
+                d[f"t{t+1}_FI_min"] = FI_n_min_list ## add the FI_n_min_list to the dictionary
+                d[f"t{t+1}_FI_max"] = FI_n_max_list ## add the FI_n_max_list to the dictionary
+            else: ## if the band is not FI
+                band_number = f'B{band.split("_")[-1][1:]}' ## get the band number for example B01
+                    ## crop the GOES image using the VIIRS image
+                B = MCMI[band] ## get the band
+                band_array = B.values[0] ## get the values of the band
+                band_value_list = [] ## list to store the band values
+                band_n_mean_list = [] ## list to store the band mean values
+                band_n_median_list = [] ## list to store the band median values
+                band_n_std_list = [] ## list to store the band std values
+                band_n_min_list = [] ## list to store the band min values
+                band_n_max_list = [] ## list to store the band max values
+                for loc in pixel_location_list: ## loop through the pixel location list
+                    row = loc[0] ## get the row location
+                    col = loc[1] ## get the column location
+                    for stat in statistics_list: ## loop through the statistics_list
+                    ## get the neighbors of the pixel including the pixel itself
+                        stat_value = remove_cloud_neighbores(band_array=band_array,
+                                                             cloud_mask_array=ACM_values,
+                                                             row_i=row,
+                                                             col_j=col,
+                                                             distance=1,
+                                                             cloud_probability_list=cloud_probability_list,
+                                                             statistic=stat)
+                        if stat == "value": ## check if the stat is value
+                            band_value_list.append(stat_value) ## append the value to the band_value_list
+                        elif stat == "mean": ## check if the stat is mean
+                            band_n_mean_list.append(stat_value) ## append the mean to the band_n_mean_list
+                        elif stat == "median": ## check if the stat is median
+                            band_n_median_list.append(stat_value) ## append the median to the band_n_median_list
+                        elif stat == "std": ## check if the stat is std
+                            band_n_std_list.append(stat_value) ## append the std to the band_n_std_list
+                        elif stat == "min": ## check if the stat is min
+                            band_n_min_list.append(stat_value) ## append the min to the band_n_min_list
+                        elif stat == "max": ## check if the stat is max
+                            band_n_max_list.append(stat_value)
+                d[f"t{t+1}_{band_number}_value"] = band_value_list ## add the band_value_list to the dictionary
+                d[f"t{t+1}_{band_number}_mean"] = band_n_mean_list ## add the band_n_mean_list to the dictionary
+                d[f"t{t+1}_{band_number}_median"] = band_n_median_list ## add the band_n_median_list to the dictionary
+                d[f"t{t+1}_{band_number}_std"] = band_n_std_list ## add the band_n_std_list to the dictionary
+                d[f"t{t+1}_{band_number}_min"] = band_n_min_list
+                d[f"t{t+1}_{band_number}_max"] = band_n_max_list
+        
+        df = pd.DataFrame(d) ## create a DataFrame from the dictionary
+        df[f"t{t+1}_FDC_value"] = FDC_list ## add the FDC_list to the DataFrame
+        df[f"t{t+1}_ACM_value"] = ACM_list ## add the ACM_list to the DataFrame
+        file_name_list = np.repeat(file_date_name, len(df)) ## repeat the file name for the length of the DataFrame
+        date_time_list = np.repeat(string_date, len(df)) ## repeat the date time for the length of the DataFrame
+        df.insert(0, f"t{t+1}_MCMI_file", file_name_list) ## insert the file name to the first column
+        df.insert(1, f"t{t+1}_GOES_date_time", date_time_list) ## insert the date time to the second column
+        df_list.append(df) ## append the DataFrame to the df_list
+    if temporal_images == 1:
+        return df_list[0] ## return the first DataFrame
+    else:
+        return pd.concat(df_list, axis=1) ## return the concatenated DataFrames
+
+# %%
+def create_AOI_image_df(MCMI_path, FDC_path,
+                          ACM_path ,VIIRS_path,
+                          AOI_path,
+                          filter_VIIRS,
+                          GOES_date_time,
+                          temporal_df, VIIRS_threshold=1,
+                          number_of_temporal_GOES_images=4, 
+                          cloud_probability_list=[2,3]):
+    """This function gets the MCMI, FDC, ACM, VIIRS, AOI paths and the temporal_df and return the AOI image DataFrame
+
+    Args:
+        MCMI_path (str): path to the MCMI file for example 'F:\\ML_project\\GOES_16\\MCMI\\OR_ABI-L2-MCMIPC-M6_G16_s202301010751.nc'
+        FDC_path (str):path to the FDC file for example 'F:\\ML_project\\GOES_16\\FDC\\OR_ABI-L2-FDCC-M6_G16_s202301010751.nc'
+        ACM_path (str): path of the ACM file for example 'F:\\ML_project\\GOES_16\\ACM\\OR_ABI-L2-ACMC-M6_G16_s202301010751.nc'
+        VIIRS_path (str): path of VIIRS image for example 'F:\\ML_project\\east_us\\VIIRS\\VIIRS_fire\\VNP14IMG.nc'
+        filter_VIIRS (GeoDataFrame): a GeoDataFrame with the VIIRS fire pixels
+        GOES_date_time (str): GOES date time for example '2023-01-01 07:51'
+        temporal_df (DataFrame): GOES temporal DataFrame
+        VIIRS_threshold (int): VIIRS threshold for rasterazing for example 1
+        number_of_temporal_GOES_images (int): number of temporal GOES. needs to be between 0 and 4
+        cloud_probability_list (list): list of cloud probabilities of ACM to be excluded for example [2,3]
+    """
+    ## check the input types
+    if isinstance(MCMI_path, str) == False:
+        raise ValueError("MCMI_path should be a string")
+    if isinstance(FDC_path, str) == False:
+        raise ValueError("FDC_path should be a string")
+    if isinstance(ACM_path, str) == False:
+        raise ValueError("ACM_path should be a string")
+    if isinstance(VIIRS_path, str) == False:
+        raise ValueError("VIIRS_path should be a string")
+    if isinstance(AOI_path, str) == False:
+        raise ValueError("AOI_path should be a string")
+    if isinstance(GOES_date_time, str) == False:
+        raise ValueError("GOES_date_time should be a string")
+    if isinstance(temporal_df, pd.DataFrame) == False:
+        raise ValueError("temporal_df should be a DataFrame")
+    if VIIRS_threshold < 0:
+        raise ValueError("VIIRS_threshold should be greater than 0")
+    if number_of_temporal_GOES_images not in [0,1,2,3,4]:
+        raise ValueError("number_of_temporal_GOES_images should be between 1 and 4")
+    if isinstance(filter_VIIRS, gpd.GeoDataFrame) == False:
+        raise ValueError("filter_VIIRS should be a GeoDataFrame")
+    
+    
+    print(f"Now working of GOES time stamp: {GOES_date_time}") ## print the GOES date time
+    ## Open GOES bands
+    MCMI = crop_GOES_using_AOI(GOES_path=MCMI_path, GOES_band="all", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
+    B7 = MCMI["CMI_C07"] ## get the band 7
+    B14 = MCMI["CMI_C14"] ## get the band 14
+    FI = (B7.values[0] - B14.values[0])/(B7.values[0] + B14.values[0]) ## calculate the fire index
+    
+    ## Rasterize VIIRS image
+    rasterized_VIIRS_image = rasterize_VIIRS(cropped_GOES_image=B7, filter_VIIRS_gdf=filter_VIIRS,
+                                      rasterize_type="count", number_of_VIIRS_points=VIIRS_threshold, VIIRS_band = None)
+    if np.any(rasterized_VIIRS_image>0) == False: ## check if the rasterized VIIRS image has no fire pixels
+        print(f"No VIIRS fire pixels for GOES time stamp: {GOES_date_time}") ## print a message
+        raise ValueError("No VIIRS fire pixels") ## raise an error
+    else: ## if there are fire pixels
+        print(f"rasterize VIIRS is done for GOES time stamp: {GOES_date_time}") ## print a message
+    
+    GOES_pixel_list = GOES_all_pixel_location_list(GOES_Fire_Index_array=FI)
+    print(f"GOES pixel list is done for GOES time stamp: {GOES_date_time}") ## print a message
+    
+    print(f"staring to genrate fire pixel values for GOES time stamp: {GOES_date_time}")
+    ## Get the fire pixel values
+    if number_of_temporal_GOES_images == 0: ## If We only use the current GOES image
+        print(f"Starting to get the fire pixel values for GOES time stamp: {GOES_date_time}")
+        df_pixels = get_fire_pixel_values_in_all_bands_for_AOI_image(pixel_location_list=GOES_pixel_list,
+                                            MCMI_path=MCMI_path,
+                                            FDC_path=FDC_path,
+                                            ACM_path=ACM_path,
+                                            VIIRS_path=VIIRS_path,
+                                            AOI_path=AOI_path,
+                                            GOES_date_time=GOES_date_time,
+                                            rasterize_VIIRS=rasterized_VIIRS_image,
+                                            cloud_probability_list=cloud_probability_list)
+       
+        print(f"done. df is ready for GOES time stamp: {GOES_date_time}")
+        return df_pixels ## return the train_df
+        
+    else: ## If we use the temporal GOES images
+        print(f"Starting to get the fire pixel values for GOES time stamp: {GOES_date_time}")   
+        df_pixels = get_fire_pixel_values_in_all_bands_for_AOI_image(pixel_location_list=GOES_pixel_list,
+                                            MCMI_path=MCMI_path,
+                                            FDC_path=FDC_path,
+                                            ACM_path=ACM_path,
+                                            VIIRS_path=VIIRS_path,
+                                            AOI_path=AOI_path,
+                                            GOES_date_time=GOES_date_time,
+                                            rasterize_VIIRS=rasterized_VIIRS_image,
+                                            cloud_probability_list=cloud_probability_list)
+        print(f"done. Now starting working on the temporal data")
+        ## Get the temporal fire pixel values
+        df_temporal_pixels = get_temporal_fire_pixel_values_in_all_bands_for_AOI_image(temporal_df=temporal_df,
+                                                                          pixel_location_list=GOES_pixel_list,
+                                                                          VIIRS_path=VIIRS_path,
+                                                                          AOI_path=AOI_path,
+                                                                          GOES_date_time=GOES_date_time,
+                                                                          temporal_images=number_of_temporal_GOES_images,
+                                                                          cloud_probability_list=cloud_probability_list)
+        ## concatenate the fire pixel values and the temporal fire pixel values
+        df_pixels_concat_temporal = pd.concat([df_pixels, df_temporal_pixels], axis=1)
+        ## add the fire label to the DataFrame
+        print(f"done. df is ready for GOES time stamp: {GOES_date_time}")
+        return df_pixels_concat_temporal ## return the train_df
     
 
 # %%
