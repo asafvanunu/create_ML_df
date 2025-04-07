@@ -1401,6 +1401,7 @@ def get_temporal_fire_pixel_values_in_all_bands_for_AOI_image(temporal_df, pixel
     if temporal_images not in [1,2,3,4]:
         raise ValueError("temporal should be between 1 and 4")
     
+    image_year = GOES_date_time.split("-")[0] ## get the year of the image
     filter_temporal_df = temporal_df[temporal_df["GOES_date_time"] == GOES_date_time] ## filter the temporal_df for the GOES_date_time
     band_list = list(range(1,17)) ## list of the MCMI bands
     CMI_list = [f"CMI_C{band:02d}" for band in band_list] ## list of the CMI bands
@@ -1421,7 +1422,11 @@ def get_temporal_fire_pixel_values_in_all_bands_for_AOI_image(temporal_df, pixel
         ACM_path = filter_temporal_df["ACM"].iloc[t] ## get the ACM path
         FDC_path = filter_temporal_df["FDC"].iloc[t] ## get the FDC path
         MCMI_path = filter_temporal_df["MCMI"].iloc[t] ## get the MCMI path
-        ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="ACM", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
+        if image_year == "2021": ## check if the image year is 2021. Open BCM instead of ACM
+            cloud_probability_list = [1] ## set the cloud probability list to [1] for 2021
+            ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="BCM", AOI_path=AOI_path) ## crop the GOES image using the AOI
+        else: ## if the image year is not 2021 open ACM
+            ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="ACM", AOI_path=AOI_path) ## crop the GOES image using the AOI
         ACM_values = ACM.values[0] ## get the values of the ACM
         FDC = crop_GOES_using_AOI(GOES_path=FDC_path, GOES_band="Mask", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
         FDC_values = FDC.values[0] ## get the values of the FDC
