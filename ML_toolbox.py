@@ -1212,6 +1212,7 @@ def get_fire_pixel_values_in_all_bands_for_AOI_image(pixel_location_list, MCMI_p
         raise ValueError("rasterize_VIIRS should be a numpy array")
     
     ## Now we will open the VIIRS file for day/night
+    image_year = GOES_date_time.split("-")[0] ## get the year of the image
     try:
         VIIRS_file = xr.open_dataset(VIIRS_path) ## open the MCMI file
         VIIRS_day_night = VIIRS_file.attrs['Day/Night/Both']
@@ -1234,7 +1235,11 @@ def get_fire_pixel_values_in_all_bands_for_AOI_image(pixel_location_list, MCMI_p
         is_night = -999
         is_day_night = -999
     t = "t0" ## set the time to t0
-    ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="ACM", AOI_path=AOI_path) ## crop the GOES image using the AOI
+    if image_year == "2021": ## check if the image year is 2021. Open BCM instead of ACM
+        cloud_probability_list = [1] ## set the cloud probability list to [1] for 2021
+        ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="BCM", AOI_path=AOI_path) ## crop the GOES image using the AOI
+    else: ## if the image year is not 2021 open ACM
+        ACM = crop_GOES_using_AOI(GOES_path=ACM_path, GOES_band="ACM", AOI_path=AOI_path) ## crop the GOES image using the AOI
     ACM_values = ACM.values[0] ## get the values of the ACM
     FDC = crop_GOES_using_AOI(GOES_path=FDC_path, GOES_band="Mask", AOI_path=AOI_path) ## crop the GOES image using the VIIRS image
     FDC_values = FDC.values[0] ## get the values of the FDC
